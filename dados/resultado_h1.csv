@@ -1,0 +1,2 @@
+modelo,m,n,cabecas,blocos,parametros,epocas,tempo_total_s,tempo_epoca_s,perda_teste,perda_persistencia,mae_T,mae_T_persistencia
+codificador_h1,24,64,2,2,101838,15,47.529413167154416,3.168627544476961,0.057168462605328485,0.07317430526018143,0.4562499225139618,0.6846587657928467
