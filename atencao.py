@@ -17,8 +17,6 @@ from transformer import (
 )
 
 N_AMOSTRAS = 64
-M_MAX_PERFIL = 49
-AZUL, LARANJA = "#2a78d6", "#eb6834"
 
 
 def pesos_atencao(modelo: Codificador, x: torch.Tensor, dev) -> torch.Tensor:
@@ -36,8 +34,7 @@ def entropias(pesos: torch.Tensor) -> np.ndarray:
 def perfil_defasagem(media: np.ndarray) -> np.ndarray:
     m = media.shape[0]
     i, j = np.indices((m, m))
-    contagem = np.bincount(np.abs(i - j).ravel(), weights=media.ravel(), minlength=m)
-    return contagem
+    return np.bincount(np.abs(i - j).ravel(), weights=media.ravel(), minlength=m)
 
 
 def extrai(horizonte: int, dados, dev) -> dict:
@@ -50,26 +47,35 @@ def extrai(horizonte: int, dados, dev) -> dict:
     idx = np.linspace(0, len(x) - 1, N_AMOSTRAS).astype(int)
     pesos = pesos_atencao(modelo, x[idx], dev)
     ents = entropias(pesos)
+    m = cfg["m"]
+    cabecas = []
+    for cabeca in range(cfg["cabecas"]):
+        media = pesos[:, cabeca].numpy().mean(axis=0)
+        perfil = perfil_defasagem(media) / m
+        cabecas.append(
+            {
+                "modelo": f"codificador_h{horizonte}",
+                "cabeca": cabeca,
+                "entropia": float(ents[cabeca]),
+                "massa_ultimo_token": float(media[:, -1].sum() / m),
+                "massa_ate_6h": float(perfil[: min(7, m)].sum()),
+            }
+        )
     cabeca = int(np.argmin(ents))
     media = pesos[:, cabeca].numpy().mean(axis=0)
-    m = media.shape[0]
     perfil = perfil_defasagem(media) / m
-    if m < M_MAX_PERFIL:
-        perfil = np.concatenate([perfil, np.zeros(M_MAX_PERFIL - m)])
-    ate = lambda d: float(perfil[: d + 1].sum())
     resumo = {
         "modelo": f"codificador_h{horizonte}",
         "cabeca": cabeca,
         "m": m,
         "entropia": float(ents[cabeca]),
         "entropia_uniforme": float(np.log(m)),
-        "massa_ate_1h": ate(1),
-        "massa_ate_6h": ate(6),
-        "massa_ate_24h": ate(24),
-        "massa_exatamente_24h": float(perfil[24]),
+        "massa_ultimo_token": float(media[:, -1].sum() / m),
+        "massa_ate_1h": float(perfil[: min(2, m)].sum()),
+        "massa_ate_6h": float(perfil[: min(7, m)].sum()),
     }
     np.savetxt(DADOS / f"atencao_media_h{horizonte}.csv", media, fmt="%.6f", delimiter=",")
-    return {"resumo": resumo, "media": media, "perfil": perfil}
+    return {"resumo": resumo, "media": media, "cabecas": cabecas}
 
 
 def figura_mapa(media: np.ndarray, horizonte: int, cabeca: int) -> None:
@@ -87,23 +93,6 @@ def figura_mapa(media: np.ndarray, horizonte: int, cabeca: int) -> None:
     fig.colorbar(im, ax=ax, shrink=0.85, label="peso médio")
     fig.tight_layout()
     fig.savefig(FIGS / f"atencao_mapa_h{horizonte}.png", bbox_inches="tight")
-    plt.close(fig)
-
-
-def figura_perfil(perfis: dict[int, np.ndarray]) -> None:
-    _estilo()
-    fig, ax = plt.subplots(figsize=(6.4, 4.0))
-    eixo = np.arange(M_MAX_PERFIL)
-    for horizonte, cor in ((1, AZUL), (24, LARANJA)):
-        ax.plot(eixo, perfis[horizonte][:M_MAX_PERFIL], "-o", color=cor, ms=3.5, lw=1.8,
-                label=f"horizonte {horizonte} h")
-    ax.set_xlabel("defasagem |consulta − chave| (horas)")
-    ax.set_ylabel("massa de atenção")
-    ax.set_title("Peso médio por defasagem temporal")
-    ax.set_xticks([0, 6, 12, 24, 36, 48])
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(FIGS / "atencao_perfil.png", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -142,31 +131,31 @@ def main() -> None:
     print(f"\ndispositivo: {dev}")
     _, _, dados, _, _, _, _ = carrega_dados()
 
-    resumos, perfis = [], {}
+    resumos, linhas_cabecas = [], []
     for horizonte in (1, 24):
         resultado = extrai(horizonte, dados, dev)
         resumo = resultado["resumo"]
         resumos.append(resumo)
-        perfis[horizonte] = resultado["perfil"]
+        linhas_cabecas += resultado["cabecas"]
         figura_mapa(resultado["media"], horizonte, resumo["cabeca"])
         print(f"horizonte {horizonte:2d} h: cabeça {resumo['cabeca']} "
               f"(entropia {resumo['entropia']:.3f} contra {resumo['entropia_uniforme']:.3f} "
-              f"da uniforme), massa até 1 h {resumo['massa_ate_1h']:.3f}, "
-              f"até 6 h {resumo['massa_ate_6h']:.3f}, até 24 h {resumo['massa_ate_24h']:.3f}, "
-              f"na defasagem 24 h {resumo['massa_exatamente_24h']:.4f}")
+              f"da uniforme), massa no último token {resumo['massa_ultimo_token']:.3f}")
+        for ln in resultado["cabecas"]:
+            print(f"  cabeça {ln['cabeca']}: entropia {ln['entropia']:.3f}, "
+                  f"último token {ln['massa_ultimo_token']:.3f}, "
+                  f"até 6 h {ln['massa_ate_6h']:.3f}")
 
-    figura_perfil(perfis)
     with open(DADOS / "atencao_resumo.csv", "w", newline="") as fp:
         w = csv.DictWriter(fp, fieldnames=list(resumos[0].keys()))
         w.writeheader()
         w.writerows(resumos)
-    with open(DADOS / "atencao_perfil.csv", "w", newline="") as fp:
-        w = csv.writer(fp)
-        w.writerow(["defasagem_h", "massa_h1", "massa_h24"])
-        for d in range(min(M_MAX_PERFIL, min(len(p) for p in perfis.values()))):
-            w.writerow([d, f"{perfis[1][d]:.6f}", f"{perfis[24][d]:.6f}"])
+    with open(DADOS / "atencao_cabecas.csv", "w", newline="") as fp:
+        w = csv.DictWriter(fp, fieldnames=list(linhas_cabecas[0].keys()))
+        w.writeheader()
+        w.writerows(linhas_cabecas)
     print(f"\nSaídas: {DADOS}/atencao_media_h*.csv, {DADOS}/atencao_resumo.csv, "
-          f"{DADOS}/atencao_perfil.csv, figs/atencao_*.png")
+          f"{DADOS}/atencao_cabecas.csv, figs/atencao_mapa_h*.png")
 
 
 if __name__ == "__main__":
